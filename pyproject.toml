@@ -1,0 +1,64 @@
+[build-system]
+requires = [
+    "setuptools>=68",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "osd-notification"
+version = "1.0.1"
+description = "Cross-platform, network-triggerable On-Screen Display notification tool with GNTP/UDP servers."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "Hadi Cahyadi", email = "cumulus13@gmail.com" },
+]
+keywords = [
+    "notification",
+    "osd",
+    "gntp",
+    "growl",
+    "pyqt5",
+    "cli",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: X11 Applications :: Qt",
+    "Topic :: Desktop Environment",
+]
+dependencies = [
+    "PyQt5>=5.15",
+    "configset>=1.0",
+]
+
+[project.license]
+text = "MIT"
+
+[project.optional-dependencies]
+pretty = [
+    "rich>=13.0",
+    "richcolorlog",
+]
+dotenv = [
+    "envdot",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[project.scripts]
+osd-notification = "osd_notification.cli:main"
+
+[tool.setuptools.packages.find]
+where = [
+    "src",
+]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]
