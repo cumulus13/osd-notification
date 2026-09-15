@@ -20,7 +20,13 @@ from typing import Callable, Optional
 
 from .exceptions import PayloadValidationError, ServerError
 from .logging_setup import get_logger
-from .protocol import GNTP_OK_RESPONSE, NotificationPayload, parse_gntp_headers
+from .protocol import (
+    GNTP_OK_RESPONSE,
+    NotificationPayload,
+    is_known_control_command,
+    parse_gntp_headers,
+    try_parse_control_command,
+)
 
 logger = get_logger("OSDNotifier.Server")
 
@@ -28,6 +34,7 @@ _SOCKET_TIMEOUT_SECONDS = 10
 _MAX_HEADER_LINES = 64
 
 PayloadHandler = Callable[[NotificationPayload], None]
+ControlHandler = Callable[[str], None]
 
 
 class GNTPTCPHandler(socketserver.StreamRequestHandler):
@@ -90,10 +97,12 @@ class UDPNotificationServer:
     stop ``Event``."""
 
     def __init__(self, host: str, port: int, payload_handler: PayloadHandler,
-                 max_payload_bytes: int = 65535):
+                 max_payload_bytes: int = 65535,
+                 control_handler: Optional[ControlHandler] = None):
         self.host = host
         self.port = port
         self.payload_handler = payload_handler
+        self.control_handler = control_handler
         self.max_payload_bytes = max_payload_bytes
         self._sock: Optional[socket.socket] = None
         self._stop_event = threading.Event()
@@ -128,6 +137,16 @@ class UDPNotificationServer:
 
     def _handle_datagram(self, data: bytes, addr) -> None:
         message_str = data.decode("utf-8", errors="ignore")
+
+        command = try_parse_control_command(message_str)
+        if command is not None:
+            if not is_known_control_command(command):
+                logger.warning("Ignoring unrecognized control command from %s: %r", addr, command)
+                return
+            logger.info("UDP control command received from %s: %s", addr, command)
+            if self.control_handler is not None:
+                self.control_handler(command)
+            return
 
         try:
             payload = NotificationPayload.from_json(message_str, source=f"udp:{addr[0]}")
@@ -166,11 +185,13 @@ class NotificationServerManager:
     cleanup of sockets and threads."""
 
     def __init__(self, host: str, gntp_port: int, udp_port: int,
-                 payload_handler: PayloadHandler, max_payload_bytes: int = 65535):
+                 payload_handler: PayloadHandler, max_payload_bytes: int = 65535,
+                 control_handler: Optional[ControlHandler] = None):
         self.host = host
         self.gntp_port = gntp_port
         self.udp_port = udp_port
         self.payload_handler = payload_handler
+        self.control_handler = control_handler
         self.max_payload_bytes = max_payload_bytes
 
         self._gntp_server: Optional[ThreadedGNTPServer] = None
@@ -200,7 +221,8 @@ class NotificationServerManager:
         logger.info("GNTP server listening on %s:%s", self.host, self.gntp_port)
 
         self._udp_server = UDPNotificationServer(
-            self.host, self.udp_port, self.payload_handler, self.max_payload_bytes
+            self.host, self.udp_port, self.payload_handler, self.max_payload_bytes,
+            control_handler=self.control_handler,
         )
         self._udp_server.start()
 

@@ -46,6 +46,14 @@ osd-notification --server --tray
 
 # Send a notification to a running server
 osd-notification --send --title "Build Successful" --text "All tests passed." --transport udp
+
+# Enable Windows-style cascading, then send several — they'll spread diagonally, not overlap
+osd-notification -c notification position auto
+osd-notification --send --title "One" --text "first"
+osd-notification --send --title "Two" --text "second"
+
+# Immediately close every currently visible notification
+osd-notification --dismiss-all
 ```
 
 ## Library usage
@@ -71,7 +79,9 @@ Config lives at `~/.osd-notification/osd-notification.ini` (Windows: `%USERPROFI
 
 | Section        | Key                  | Default        | Notes                                   |
 |----------------|----------------------|-----------------|------------------------------------------|
-| `notification` | `position`            | `center_center` | one of the 9 screen positions            |
+| `notification` | `position`            | `center_center` | one of 9 fixed screen positions, `auto` to cascade like Windows' default window placement, or `random` to scatter anywhere on screen |
+| `notification` | `auto_anchor`          | `bottom_right`  | corner the cascade starts from when `position = auto` |
+| `notification` | `stack_gap`            | `30`            | diagonal px offset per notification in `auto` mode (cascade step) |
 | `notification` | `opacity`              | `0.95`          | clamped to `[0.05, 1.0]`                 |
 | `notification` | `timeout`              | `3000`          | ms, clamped to `[0, 60000]`              |
 | `notification` | `sticky`               | `False`         | overridden per-notification              |
@@ -108,6 +118,7 @@ Config lives at `~/.osd-notification/osd-notification.ini` (Windows: `%USERPROFI
 
 - **Show Test Notification** — also triggered by left-click/double-click on the icon
 - **Start Server / Stop Server** — toggles the GNTP/UDP servers at runtime, label updates live
+- **Dismiss All Notifications** — instantly closes every currently visible notification
 - **Open Config File** — reveals the config directory in the OS file manager
 - **Quit** — cleanly shuts down servers and the tray before exiting
 
@@ -115,6 +126,51 @@ If no `icon_path` is set (or the file is missing/invalid), a small filled-circle
 generated in-memory using the configured `appearance.border_color`, so the tray works with
 zero bundled assets. On a session with no system tray (e.g. some headless Linux setups),
 `--tray` logs a warning and the app continues without one rather than crashing.
+
+### Auto-position cascading (like Windows' default new-window placement)
+
+By default (`position = center_center`, or any other fixed value) every notification is its
+own window placed at the exact same spot — sending several at once means they land right on
+top of each other. Set `position = auto` and each new notification instead cascades
+diagonally across the available screen from a starting corner (`auto_anchor`) — the same
+placement Windows uses for new windows (e.g. opening several `cmd.exe` windows with default
+placement), spreading them out rather than piling them in one line:
+
+```bash
+osd-notification -c notification position auto
+osd-notification -c notification auto_anchor bottom_right   # starting corner: top_left, top_right, bottom_left...
+osd-notification -c notification stack_gap 30                 # diagonal px offset per notification
+```
+
+The cascade steps diagonally away from `auto_anchor`'s corner, wrapping back to the start
+once it would run off the opposite edge of the screen — and once every notification has been
+dismissed, the next one starts back at the anchor corner instead of continuing to creep
+across the screen. Dismissing one notification does **not** move the others (matches real OS
+window cascading: closing one `cmd.exe` window doesn't reposition the rest).
+
+If you don't want a repeating path at all — just spread anywhere on the monitor — use
+`random` instead:
+
+```bash
+osd-notification -c notification position random
+```
+
+Each notification lands at a genuinely random spot on the available screen (respecting
+`margin`), trying several candidate positions and picking whichever overlaps least with
+notifications already visible — so repeated notifications actually spread across the whole
+monitor rather than following any fixed diagonal or always starting from the same corner.
+
+### Dismissing notifications immediately
+
+```bash
+osd-notification --dismiss-all
+```
+
+Sends a small control message over the same UDP channel notifications use (distinct from a
+normal notification payload), telling the running server to close every currently visible
+notification window right away — no fade animation, no waiting out the timeout. Requires a
+server (`--server` or `--tray` with servers running) to already be listening; it's the same
+requirement as `--send`. Also available as "Dismiss All Notifications" in the tray menu.
 
 ### Long text / auto-wrap sizing
 

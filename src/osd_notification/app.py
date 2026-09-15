@@ -17,9 +17,11 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon
 
 from .config import OSDConfigManager
+from .dispatcher import ControlDispatcher
 from .exceptions import ServerError
 from .logging_setup import get_logger
-from .protocol import NotificationPayload
+from .manager import NotificationManager
+from .protocol import CONTROL_DISMISS_ALL, NotificationPayload
 from .server import NotificationServerManager
 from .tray import SystemTrayManager
 from .widget import OSDNotification
@@ -28,7 +30,7 @@ logger = get_logger("OSDNotifier.App")
 
 
 class OSDApplication:
-    """Owns the QApplication, the notification widget, and (optionally) the
+    """Owns the QApplication, the notification manager, and (optionally) the
     background GNTP/UDP servers and the system tray icon, and ties them
     together with clean shutdown."""
 
@@ -36,10 +38,14 @@ class OSDApplication:
         self.config = config or OSDConfigManager()
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
-        self.widget = OSDNotification(self.config)
+
+        self.manager = NotificationManager(self.config)
+        self.control_dispatcher = ControlDispatcher()
+        self.control_dispatcher.dismiss_all_requested.connect(self.manager.dismiss_all)
+
         self.server_manager: Optional[NotificationServerManager] = None
         self.tray: Optional[SystemTrayManager] = None
-        self._last_demo_payload: Optional[NotificationPayload] = None
+        self._last_demo_widget: Optional[OSDNotification] = None
 
     def start_servers(self) -> None:
         host = self.config.get_val("server", "host", "127.0.0.1")
@@ -49,8 +55,9 @@ class OSDApplication:
 
         self.server_manager = NotificationServerManager(
             host=host, gntp_port=gntp_port, udp_port=udp_port,
-            payload_handler=self.widget.dispatcher.dispatch,
+            payload_handler=self.manager.dispatcher.dispatch,
             max_payload_bytes=max_payload,
+            control_handler=self._on_control_command,
         )
         try:
             self.server_manager.start()
@@ -66,6 +73,12 @@ class OSDApplication:
 
     def is_server_running(self) -> bool:
         return self.server_manager is not None and self.server_manager.is_running
+
+    def _on_control_command(self, command: str) -> None:
+        # Called from a server thread: hop to the Qt main thread via the
+        # dispatcher's signal before touching any widget/manager state.
+        if command == CONTROL_DISMISS_ALL:
+            self.control_dispatcher.dismiss_all_requested.emit()
 
     def toggle_servers(self) -> None:
         notify = self.config.get_bool("tray", "notify_on_server_toggle", True)
@@ -92,31 +105,32 @@ class OSDApplication:
 
         self.tray = SystemTrayManager(
             config=self.config,
-            parent=self.widget,
+            parent=None,
             on_test=self.run_demo,
             on_toggle_server=self.toggle_servers,
             is_server_running=self.is_server_running,
+            on_dismiss_all=self.manager.dismiss_all,
             on_quit=self.app.quit,
         )
         self.tray.show()
 
-    def run_demo(self, payload: Optional[NotificationPayload] = None) -> None:
+    def run_demo(self, payload: Optional[NotificationPayload] = None) -> OSDNotification:
         """Show a single local notification with no network involved.
 
         With no `payload`, shows the default rocket-glyph demo (used by
         bare `--test`). Given a payload (via `--test --text "..."`), it is
         routed through the exact same code path as a network notification
-        (`OSDNotification.handle_remote_notification`) — this lets you
-        verify wrapping/sizing behavior directly against a specific
-        title/text without needing a server process running at all, which
-        also rules out a stale/already-running server as the cause of
-        unexpected behavior.
+        — this lets you verify wrapping/sizing/stacking behavior directly
+        against specific content without needing a server process running
+        at all, which also rules out a stale/already-running server as the
+        cause of unexpected output.
         """
         if payload is not None:
-            self.widget.handle_remote_notification(payload)
+            widget = self.manager.spawn(payload)
         else:
-            self.widget.show_character("\U0001f680", hex_str="1F680")
-        self._last_demo_payload = payload
+            widget = self.manager.spawn_glyph("\U0001f680", hex_str="1F680")
+        self._last_demo_widget = widget
+        return widget
 
     def run(self, quit_after_demo: bool = False) -> int:
         signal.signal(signal.SIGINT, lambda *_: self.app.quit())
@@ -127,16 +141,12 @@ class OSDApplication:
         signal_pump.start(200)
         signal_pump.timeout.connect(lambda: None)
 
-        if quit_after_demo:
-            demo_payload = getattr(self, "_last_demo_payload", None)
-            demo_sticky = demo_payload.sticky if demo_payload is not None else None
-            demo_timeout = demo_payload.timeout if demo_payload is not None else None
-
-            is_sticky = self.widget._is_sticky(demo_sticky)  # noqa: SLF001 - intentional internal use
-            if not is_sticky:
-                timeout = self.widget._get_timeout(demo_timeout)  # noqa: SLF001
-                total_duration = 250 + timeout + 350 + 100
-                QTimer.singleShot(total_duration, self.app.quit)
+        if quit_after_demo and self._last_demo_widget is not None:
+            widget = self._last_demo_widget
+            if not widget._is_sticky(None):  # noqa: SLF001 - intentional internal use
+                # Quit once the demo notification has actually finished
+                # fading out, instead of re-deriving/guessing its duration.
+                widget.dismissed.connect(self.app.quit)
 
         try:
             exit_code = self.app.exec_()

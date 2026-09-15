@@ -84,6 +84,9 @@ class SystemTrayManager:
     is_server_running:
         Returns the current server state, used to label the toggle action
         and refresh it whenever the menu is shown.
+    on_dismiss_all:
+        Called when "Dismiss All Notifications" is clicked. Should close
+        every currently visible notification immediately.
     on_open_config:
         Called when "Open Config File" is clicked. Defaults to revealing
         ``config.config_path`` in the OS file manager.
@@ -95,6 +98,7 @@ class SystemTrayManager:
                  on_test: Optional[Callable[[], None]] = None,
                  on_toggle_server: Optional[Callable[[], None]] = None,
                  is_server_running: Optional[Callable[[], bool]] = None,
+                 on_dismiss_all: Optional[Callable[[], None]] = None,
                  on_open_config: Optional[Callable[[], None]] = None,
                  on_quit: Optional[Callable[[], None]] = None):
         if on_quit is None:
@@ -104,6 +108,7 @@ class SystemTrayManager:
         self._on_test = on_test
         self._on_toggle_server = on_toggle_server
         self._is_server_running = is_server_running or (lambda: False)
+        self._on_dismiss_all = on_dismiss_all
         self._on_open_config = on_open_config or self._default_open_config
         self._on_quit = on_quit
 
@@ -130,6 +135,11 @@ class SystemTrayManager:
         self.toggle_server_action.triggered.connect(self._handle_toggle_server)
         self.toggle_server_action.setEnabled(self._on_toggle_server is not None)
         self.menu.addAction(self.toggle_server_action)
+
+        self.dismiss_all_action = QAction("Dismiss All Notifications", self.menu)
+        self.dismiss_all_action.triggered.connect(self._handle_dismiss_all)
+        self.dismiss_all_action.setEnabled(self._on_dismiss_all is not None)
+        self.menu.addAction(self.dismiss_all_action)
 
         self.menu.addSeparator()
 
@@ -169,6 +179,13 @@ class SystemTrayManager:
             except Exception:
                 logger.exception("Tray 'Start/Stop Server' handler failed.")
             self._refresh_toggle_label()
+
+    def _handle_dismiss_all(self) -> None:
+        if self._on_dismiss_all is not None:
+            try:
+                self._on_dismiss_all()
+            except Exception:
+                logger.exception("Tray 'Dismiss All Notifications' handler failed.")
 
     def _default_open_config(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.config.config_path.parent)))

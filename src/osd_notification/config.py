@@ -26,9 +26,10 @@ logger = get_logger("OSDNotifier.Config")
 _SECRET_OPTIONS = {"token", "password", "client_id", "client_secret", "api_key", "secret"}
 
 _VALID_POSITIONS = {
-    "center_center", "top_left", "top_right", "top_center",
+    "auto", "random", "center_center", "top_left", "top_right", "top_center",
     "bottom_left", "bottom_right", "bottom_center", "center_left", "center_right",
 }
+_VALID_ANCHORS = _VALID_POSITIONS - {"auto", "random"}
 
 
 class OSDConfigManager(configset_ini.ConfigSetIni):
@@ -47,6 +48,8 @@ class OSDConfigManager(configset_ini.ConfigSetIni):
             "timeout": "3000",
             "sticky": "False",
             "margin": "20",
+            "auto_anchor": "bottom_right",
+            "stack_gap": "30",
         },
         "appearance": {
             "font_family": "Consolas",
@@ -214,6 +217,29 @@ class OSDConfigManager(configset_ini.ConfigSetIni):
     def get_position(self, default: str = "center_center") -> str:
         val = self.get_val("notification", "position", default).strip().lower()
         return val if val in _VALID_POSITIONS else default
+
+    def is_auto_position(self) -> bool:
+        return self.get_position() == "auto"
+
+    def is_random_position(self) -> bool:
+        return self.get_position() == "random"
+
+    def get_auto_anchor(self, default: str = "bottom_right") -> str:
+        """The screen corner the cascade *starts* from when
+        `position = auto` — new notifications then spread diagonally
+        across the whole available screen from there (wrapping back to
+        the start once they'd run off the opposite edge), the same way
+        Windows cascades new windows (e.g. opening several `cmd.exe`
+        windows with default placement) rather than stacking them in a
+        single line."""
+        val = self.get_val("notification", "auto_anchor", default).strip().lower()
+        return val if val in _VALID_ANCHORS else default
+
+    def get_cascade_step(self) -> int:
+        """Diagonal pixel offset applied to each successive notification
+        in `auto` mode (kept as the `stack_gap` key for config
+        compatibility)."""
+        return self.get_int("notification", "stack_gap", 30, min_val=0, max_val=200)
 
     def get_opacity(self) -> float:
         return self.get_float("notification", "opacity", 0.95, min_val=0.05, max_val=1.0)

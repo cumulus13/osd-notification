@@ -58,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     send_group.add_argument("--timeout-ms", type=int, default=None, help="Auto-dismiss timeout in milliseconds")
     send_group.add_argument("--transport", choices=("udp", "gntp"), default="udp",
                              help="Delivery transport for --send (default: udp)")
+    send_group.add_argument("--dismiss-all", action="store_true",
+                             help="\U0001f6d1 Tell the running server to immediately close "
+                                  "every currently visible notification")
 
     return parser
 
@@ -135,6 +138,21 @@ def _handle_send(cm: OSDConfigManager, args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_dismiss_all(cm: OSDConfigManager) -> int:
+    client = NotificationClient(
+        host=cm.get_val("server", "host", "127.0.0.1"),
+        udp_port=cm.get_int("server", "udp_port", 23064),
+    )
+    try:
+        client.dismiss_all()
+    except ClientError as exc:
+        _print(f"\u274c [white on red]Failed to dismiss notifications:[/] {exc}")
+        return 1
+    _print("\u2705 [bold #00FF00]Dismissed all notifications.[/]")
+    return 0
+    return 0
+
+
 def _handle_server_or_test(cm: OSDConfigManager, args: argparse.Namespace) -> int:
     # Imported lazily: requires PyQt5, which is unnecessary for config/send-only usage.
     from .app import OSDApplication
@@ -184,11 +202,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.reset_config is not None:
             return _handle_reset_config(cm, args.reset_config)
 
-        if args.config is not None or ("-c" in argv or "--config" in argv):
+        if args.config is not None or args.show or ("-c" in argv or "--config" in argv):
             return _handle_config_flag(cm, args)
 
         if args.send:
             return _handle_send(cm, args)
+
+        if args.dismiss_all:
+            return _handle_dismiss_all(cm)
 
         if args.test or args.server or args.tray or cm.get_bool("server", "enabled", False):
             return _handle_server_or_test(cm, args)

@@ -122,3 +122,49 @@ def test_reset_all_resets_every_section(cm: OSDConfigManager):
     cm.reset_all()
     assert cm.get_timeout_ms() == 3000
     assert cm.get_max_width() == 380
+
+
+def test_position_defaults_to_center_center(cm: OSDConfigManager):
+    assert cm.get_position() == "center_center"
+    assert cm.is_auto_position() is False
+
+
+def test_position_auto_is_accepted(cm: OSDConfigManager):
+    cm.write_config("notification", "position", "auto")
+    assert cm.get_position() == "auto"
+    assert cm.is_auto_position() is True
+
+
+def test_position_random_is_accepted(cm: OSDConfigManager):
+    cm.write_config("notification", "position", "random")
+    assert cm.get_position() == "random"
+    assert cm.is_random_position() is True
+    assert cm.is_auto_position() is False
+
+
+def test_position_invalid_value_falls_back_to_default(cm: OSDConfigManager):
+    cm.write_config("notification", "position", "nowhere")
+    assert cm.get_position() == "center_center"
+
+
+def test_auto_anchor_default_and_validation(cm: OSDConfigManager):
+    assert cm.get_auto_anchor() == "bottom_right"
+
+    cm.write_config("notification", "auto_anchor", "top_left")
+    assert cm.get_auto_anchor() == "top_left"
+
+    cm.write_config("notification", "auto_anchor", "auto")  # not a valid anchor
+    assert cm.get_auto_anchor() == "bottom_right"
+
+    cm.write_config("notification", "auto_anchor", "nonsense")
+    assert cm.get_auto_anchor() == "bottom_right"
+
+
+def test_cascade_step_default_and_clamping(cm: OSDConfigManager):
+    assert cm.get_cascade_step() == 30
+
+    cm.write_config("notification", "stack_gap", "-5")
+    assert cm.get_cascade_step() == 0
+
+    cm.write_config("notification", "stack_gap", "9999")
+    assert cm.get_cascade_step() == 200

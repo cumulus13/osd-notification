@@ -25,3 +25,12 @@ class NotificationDispatcher(QObject):
 
     def dispatch(self, payload: NotificationPayload) -> None:
         self.show_notification.emit(payload)
+
+
+class ControlDispatcher(QObject):
+    """Emits control-command signals on the Qt main thread when a network
+    server thread receives one (e.g. a "dismiss all" UDP control message).
+    Qt widgets/managers must only be touched from the main thread, so this
+    exists for the same reason NotificationDispatcher does."""
+
+    dismiss_all_requested = pyqtSignal()

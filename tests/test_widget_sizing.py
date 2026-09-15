@@ -145,3 +145,24 @@ def test_insert_soft_breaks_resets_on_whitespace():
 def test_insert_soft_breaks_zero_max_run_is_noop():
     from osd_notification.widget import insert_soft_breaks
     assert insert_soft_breaks("X" * 50, max_run=0) == "X" * 50
+
+
+def test_dismiss_immediate_hides_and_emits_signal(widget):
+    widget.show_character("\U0001f680", hex_str="1F680")
+    assert widget.isVisible()
+
+    received = []
+    widget.dismissed.connect(lambda w: received.append(w))
+
+    widget.dismiss(animate=False)
+
+    assert not widget.isVisible()
+    assert received == [widget]
+
+
+def test_dismiss_animated_starts_fade_out(widget):
+    widget.show_character("\U0001f680", hex_str="1F680")
+    widget.dismiss(animate=True)
+    # Fade animation is running; widget hasn't been hidden yet (that
+    # happens once the QPropertyAnimation finishes).
+    assert widget.anim is not None

@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
-from PyQt5.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt, QTimer
+from PyQt5.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QFontMetrics, QIcon, QPixmap
 from PyQt5.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 
@@ -62,6 +62,8 @@ def insert_soft_breaks(text: str, max_run: int) -> str:
 class OSDNotification(QWidget):
     """Frameless OSD window supporting sticky notifications, images,
     auto-sizing, and network-triggered updates via ``NotificationDispatcher``."""
+
+    dismissed = pyqtSignal(object)  # emits self once fully hidden/closed
 
     def __init__(self, config: Optional[OSDConfigManager] = None,
                  parent: Optional[QWidget] = None):
@@ -316,9 +318,29 @@ class OSDNotification(QWidget):
         self.anim.setStartValue(self.windowOpacity())
         self.anim.setEndValue(0.0)
         self.anim.setEasingCurve(QEasingCurve.InCubic)
-        self.anim.finished.connect(self.hide)
+        self.anim.finished.connect(self._on_hidden)
         self.anim.start()
 
+    def _on_hidden(self) -> None:
+        self.hide()
+        self.dismissed.emit(self)
+
+    def dismiss(self, animate: bool = True) -> None:
+        """Close this notification. With `animate=False` it disappears
+        immediately (no fade), used by "dismiss all" so notifications
+        clear right away instead of waiting out their fade-out animation."""
+        if self.dismiss_timer:
+            self.dismiss_timer.stop()
+            self.dismiss_timer = None
+        if self.anim:
+            self.anim.stop()
+            self.anim = None
+
+        if animate:
+            self._fade_out()
+        else:
+            self._on_hidden()
+
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        self._fade_out()
+        self.dismiss(animate=True)
         super().mousePressEvent(event)

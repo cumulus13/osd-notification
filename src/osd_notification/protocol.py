@@ -21,6 +21,9 @@ from .exceptions import PayloadValidationError
 GNTP_PROTOCOL_LINE = "GNTP/1.0 NOTIFY NONE"
 GNTP_OK_RESPONSE = "GNTP/1.0 -OK NONE\r\nResponse-Action: NOTIFY\r\n\r\n"
 
+CONTROL_DISMISS_ALL = "dismiss_all"
+_KNOWN_CONTROL_COMMANDS = {CONTROL_DISMISS_ALL}
+
 _MAX_TITLE_LEN = 200
 _MAX_TEXT_LEN = 4000
 _ALLOWED_ICON_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".ico", ".svg"}
@@ -129,6 +132,26 @@ class NotificationPayload:
             timeout=timeout,
             source=source,
         )
+
+
+def try_parse_control_command(raw: str) -> Optional[str]:
+    """If `raw` is a JSON object with a `command` key, return the lowercased
+    command string (even if it isn't one we recognize — the caller should
+    still treat it as a control message, not fall through to notification
+    parsing, and log/ignore the unknown command). Returns None only when
+    `raw` isn't a JSON object with a `command` key at all, i.e. it's an
+    ordinary notification payload."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or "command" not in data:
+        return None
+    return str(data["command"]).strip().lower()
+
+
+def is_known_control_command(command: str) -> bool:
+    return command in _KNOWN_CONTROL_COMMANDS
 
 
 def parse_gntp_headers(raw_lines: List[str]) -> Dict[str, str]:

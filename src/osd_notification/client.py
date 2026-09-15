@@ -12,14 +12,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from .exceptions import ClientError
 from .logging_setup import get_logger
-from .protocol import NotificationPayload
+from .protocol import CONTROL_DISMISS_ALL, NotificationPayload
 
 logger = get_logger("OSDNotifier.Client")
 
@@ -74,10 +75,16 @@ class NotificationClient:
             raise ClientError(f"Unknown transport: {transport!r} (expected 'udp' or 'gntp')")
 
     def send_udp(self, payload: NotificationPayload) -> None:
-        self._with_retries(self._send_udp_once, payload)
+        self._with_retries(lambda: self._send_udp_once(payload))
 
     def send_gntp(self, payload: NotificationPayload) -> None:
-        self._with_retries(self._send_gntp_once, payload)
+        self._with_retries(lambda: self._send_gntp_once(payload))
+
+    def dismiss_all(self) -> None:
+        """Tell the running server to immediately close every currently
+        shown notification. Sent over UDP as a small control message,
+        distinct from a normal notification payload."""
+        self._with_retries(self._send_dismiss_all_once)
 
     # ------------------------------------------------------------------ #
     # Transport implementations
@@ -91,6 +98,18 @@ class NotificationClient:
             logger.debug("Sent UDP notification to %s:%s: %s", self.host, self.udp_port, payload.title)
         except OSError as exc:
             raise ClientError(f"UDP send to {self.host}:{self.udp_port} failed: {exc}") from exc
+        finally:
+            sock.close()
+
+    def _send_dismiss_all_once(self) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(self.timeout)
+        try:
+            message = json.dumps({"command": CONTROL_DISMISS_ALL}).encode("utf-8")
+            sock.sendto(message, (self.host, self.udp_port))
+            logger.debug("Sent dismiss_all control message to %s:%s", self.host, self.udp_port)
+        except OSError as exc:
+            raise ClientError(f"dismiss_all send to {self.host}:{self.udp_port} failed: {exc}") from exc
         finally:
             sock.close()
 
@@ -109,11 +128,11 @@ class NotificationClient:
         finally:
             sock.close()
 
-    def _with_retries(self, fn, payload: NotificationPayload) -> None:
+    def _with_retries(self, fn: Callable[[], None]) -> None:
         last_exc: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
-                fn(payload)
+                fn()
                 return
             except ClientError as exc:
                 last_exc = exc

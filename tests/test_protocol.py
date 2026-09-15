@@ -131,3 +131,48 @@ def test_resolve_icon_path_strips_file_scheme(tmp_path: Path):
     icon.write_bytes(b"\x89PNG\r\n")
     resolved = resolve_icon_path(f"file://{icon}", allowed_dirs=[tmp_path])
     assert resolved == icon.resolve()
+
+
+def test_try_parse_control_command_recognizes_dismiss_all():
+    from osd_notification.protocol import try_parse_control_command, CONTROL_DISMISS_ALL
+    import json
+
+    msg = json.dumps({"command": "dismiss_all"})
+    assert try_parse_control_command(msg) == CONTROL_DISMISS_ALL
+
+
+def test_try_parse_control_command_is_case_insensitive():
+    from osd_notification.protocol import try_parse_control_command, CONTROL_DISMISS_ALL
+    import json
+
+    msg = json.dumps({"command": "DISMISS_ALL"})
+    assert try_parse_control_command(msg) == CONTROL_DISMISS_ALL
+
+
+def test_try_parse_control_command_returns_none_for_notification_payload():
+    from osd_notification.protocol import try_parse_control_command
+    import json
+
+    msg = json.dumps({"title": "Hello", "text": "World"})
+    assert try_parse_control_command(msg) is None
+
+
+def test_try_parse_control_command_returns_none_for_invalid_json():
+    from osd_notification.protocol import try_parse_control_command
+    assert try_parse_control_command("not json {{{") is None
+
+
+def test_try_parse_control_command_returns_unknown_command_string():
+    from osd_notification.protocol import try_parse_control_command, is_known_control_command
+    import json
+
+    msg = json.dumps({"command": "reboot"})
+    command = try_parse_control_command(msg)
+    assert command == "reboot"
+    assert is_known_control_command(command) is False
+
+
+def test_is_known_control_command():
+    from osd_notification.protocol import is_known_control_command, CONTROL_DISMISS_ALL
+    assert is_known_control_command(CONTROL_DISMISS_ALL) is True
+    assert is_known_control_command("bogus") is False
