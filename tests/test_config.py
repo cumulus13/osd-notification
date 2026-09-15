@@ -8,6 +8,7 @@
 
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -16,8 +17,12 @@ from osd_notification.config import OSDConfigManager
 
 @pytest.fixture()
 def cm(tmp_path, monkeypatch):
+    # Isolate the config dir on every platform: the Windows branch reads
+    # %USERPROFILE%, the POSIX branch reads Path.home() — patch both so a
+    # test run never touches (or leaks state from) the real home directory.
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(os.path, "expandvars", lambda s: str(tmp_path) if "USERPROFILE" in s else s)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     manager = OSDConfigManager(app_name="osd-notification-test")
     yield manager
 
@@ -84,3 +89,36 @@ def test_max_width_never_below_min_width(cm: OSDConfigManager):
     cm.write_config("window", "min_width", "300")
     cm.write_config("window", "max_width", "100")
     assert cm.get_max_width() == 300
+
+
+def test_tray_defaults(cm: OSDConfigManager):
+    assert cm.get_bool("tray", "enabled", False) is True
+    assert cm.get_val("tray", "tooltip", "") == "OSD Notification"
+    assert cm.get_val("tray", "icon_path", "sentinel") == "sentinel"
+    assert cm.get_bool("tray", "notify_on_server_toggle", False) is True
+
+
+def test_reset_section_discards_stale_values(cm: OSDConfigManager):
+    cm.write_config("window", "max_height", "100")
+    cm.write_config("window", "max_width", "50")
+    assert cm.get_max_height() == 240  # clamped up to base_height, but still wrong/tiny
+    assert cm.get_max_width() == 240
+
+    cm.reset_section("window")
+
+    assert cm.get_max_height() == 600
+    assert cm.get_max_width() == 380
+
+
+def test_reset_section_unknown_raises(cm: OSDConfigManager):
+    from osd_notification.exceptions import ConfigError
+    with pytest.raises(ConfigError):
+        cm.reset_section("does-not-exist")
+
+
+def test_reset_all_resets_every_section(cm: OSDConfigManager):
+    cm.write_config("notification", "timeout", "999")
+    cm.write_config("window", "max_width", "50")
+    cm.reset_all()
+    assert cm.get_timeout_ms() == 3000
+    assert cm.get_max_width() == 380

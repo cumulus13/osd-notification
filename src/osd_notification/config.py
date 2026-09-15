@@ -68,10 +68,18 @@ class OSDConfigManager(configset_ini.ConfigSetIni):
             "base_height": "240",
             "min_width": "240",
             "max_width": "380",
+            "max_height": "600",
             "text_padding": "40",
             "extra_height": "40",
             "icon_max_width": "160",
             "icon_max_height": "140",
+            "soft_wrap_chars": "30",
+        },
+        "tray": {
+            "enabled": "True",
+            "icon_path": "",
+            "tooltip": "OSD Notification",
+            "notify_on_server_toggle": "True",
         },
     }
 
@@ -124,6 +132,28 @@ class OSDConfigManager(configset_ini.ConfigSetIni):
                             "Could not persist default [%s] %s = %s: %s",
                             section, option, default_value, exc,
                         )
+
+    def reset_section(self, section: str) -> None:
+        """Overwrite every key in `section` back to its documented default,
+        discarding stale/conflicting values left over from an older config
+        schema (e.g. a `[window]` section written before `max_height`
+        existed, or a leftover value smaller than the current minimum).
+        Raises ConfigError for an unrecognized section name."""
+        if section not in self.DEFAULT_CONFIG:
+            raise ConfigError(
+                f"Unknown config section '{section}'. "
+                f"Valid sections: {', '.join(self.DEFAULT_CONFIG)}"
+            )
+        if not self.has_section(section):
+            self.add_section(section)
+        for option, default_value in self.DEFAULT_CONFIG[section].items():
+            self.write_config(section, option, default_value)
+        logger.info("Reset [%s] to defaults.", section)
+
+    def reset_all(self) -> None:
+        """Reset every known section to its documented defaults."""
+        for section in self.DEFAULT_CONFIG:
+            self.reset_section(section)
 
     # ------------------------------------------------------------------ #
     # Typed, validated getters
@@ -217,6 +247,11 @@ class OSDConfigManager(configset_ini.ConfigSetIni):
         max_width = self.get_int("window", "max_width", 380, min_val=80, max_val=2000)
         return max(max_width, self.get_min_width())
 
+    def get_max_height(self) -> int:
+        max_height = self.get_int("window", "max_height", 600, min_val=80, max_val=3000)
+        base_height = self.get_int("window", "base_height", 240, min_val=80, max_val=1000)
+        return max(max_height, base_height)
+
     def get_text_padding(self) -> int:
         return self.get_int("window", "text_padding", 40, min_val=0, max_val=200)
 
@@ -227,6 +262,12 @@ class OSDConfigManager(configset_ini.ConfigSetIni):
         width = self.get_int("window", "icon_max_width", 160, min_val=16, max_val=1000)
         height = self.get_int("window", "icon_max_height", 140, min_val=16, max_val=1000)
         return width, height
+
+    def get_soft_wrap_chars(self) -> int:
+        """Max run length (in characters) of unbroken, whitespace-free text
+        before a soft break point is inserted so it can still word-wrap.
+        See `widget.insert_soft_breaks`."""
+        return self.get_int("window", "soft_wrap_chars", 30, min_val=5, max_val=200)
 
     # ------------------------------------------------------------------ #
     # Redacted display (used by CLI `--show`)

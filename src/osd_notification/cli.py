@@ -39,8 +39,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-c", "--config", nargs="*", default=None,
                          help="\u2139\ufe0f Show config path, or get/set a section/key/value")
     parser.add_argument("-s", "--show", action="store_true", help="\U0001f440 Show all current config")
-    parser.add_argument("-t", "--test", action="store_true", help="\U0001f9ea Show a local demo notification")
+    parser.add_argument("-t", "--test", action="store_true",
+                         help="\U0001f9ea Show a local notification with no server involved. "
+                              "Combine with --title/--text/--icon/--sticky to preview "
+                              "specific content (e.g. to check text-wrapping).")
     parser.add_argument("--server", action="store_true", help="\U0001f310 Start GNTP & UDP notification servers")
+    parser.add_argument("--tray", action="store_true", help="\U0001f5a5\ufe0f Show a system tray icon with quick actions")
+    parser.add_argument("--reset-config", metavar="SECTION", nargs="?", const="all",
+                         help="\U0001f504 Reset a config section (e.g. 'window') to its defaults, "
+                              "discarding stale values. Omit SECTION to reset everything.")
 
     send_group = parser.add_argument_group("send (fire a notification at a running server)")
     send_group.add_argument("--send", action="store_true", help="\U0001f4e4 Send a notification via the client")
@@ -97,6 +104,21 @@ def _handle_config_flag(cm: OSDConfigManager, args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_reset_config(cm: OSDConfigManager, section: str) -> int:
+    try:
+        if section == "all":
+            cm.reset_all()
+            _print(f"\u2705 [bold #00FF00]Reset all sections to defaults[/] in {cm.config_path}")
+        else:
+            cm.reset_section(section)
+            _print(f"\u2705 [bold #00FF00]Reset[/] [bold #FFFF00]\\[{section}][/] "
+                   f"[bold #00FF00]to defaults[/] in {cm.config_path}")
+    except ConfigError as exc:
+        _print(f"\u274c [white on red]{exc}[/]")
+        return 1
+    return 0
+
+
 def _handle_send(cm: OSDConfigManager, args: argparse.Namespace) -> int:
     client = NotificationClient(
         host=cm.get_val("server", "host", "127.0.0.1"),
@@ -116,14 +138,27 @@ def _handle_send(cm: OSDConfigManager, args: argparse.Namespace) -> int:
 def _handle_server_or_test(cm: OSDConfigManager, args: argparse.Namespace) -> int:
     # Imported lazily: requires PyQt5, which is unnecessary for config/send-only usage.
     from .app import OSDApplication
+    from .protocol import NotificationPayload
 
     app = OSDApplication(cm)
     try:
         if args.server or cm.get_bool("server", "enabled", False):
             app.start_servers()
+        if args.tray:
+            app.start_tray()
         if args.test:
-            app.run_demo()
-        return app.run(quit_after_demo=args.test and not args.server)
+            if args.text or args.title != "Notification" or args.icon or args.sticky:
+                # A specific title/text/icon was given: preview it locally,
+                # no network/server involved — the same code path a real
+                # GNTP/UDP notification takes, so this isolates whether an
+                # issue is in the widget itself vs. a stale server process.
+                payload = NotificationPayload(title=args.title, text=args.text, icon=args.icon,
+                                               sticky=args.sticky, timeout=args.timeout_ms)
+                app.run_demo(payload)
+            else:
+                app.run_demo()
+        quit_after_demo = args.test and not args.server and not args.tray
+        return app.run(quit_after_demo=quit_after_demo)
     except ServerError as exc:
         _print(f"\u274c [white on red]Server error:[/] {exc}")
         return 1
@@ -146,13 +181,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     try:
+        if args.reset_config is not None:
+            return _handle_reset_config(cm, args.reset_config)
+
         if args.config is not None or ("-c" in argv or "--config" in argv):
             return _handle_config_flag(cm, args)
 
         if args.send:
             return _handle_send(cm, args)
 
-        if args.test or args.server or cm.get_bool("server", "enabled", False):
+        if args.test or args.server or args.tray or cm.get_bool("server", "enabled", False):
             return _handle_server_or_test(cm, args)
 
         parser.print_help()

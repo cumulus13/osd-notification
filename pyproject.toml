@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "osd-notification"
-version = "1.0.1"
+version = "1.0.2"
 description = "Cross-platform, network-triggerable On-Screen Display notification tool with GNTP/UDP servers."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -48,6 +48,7 @@ dotenv = [
 dev = [
     "pytest>=7.0",
     "pytest-cov",
+    "PyQt5>=5.15",
 ]
 
 [project.scripts]

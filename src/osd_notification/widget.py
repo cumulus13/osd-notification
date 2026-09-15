@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
-from PyQt5.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer
+from PyQt5.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt, QTimer
 from PyQt5.QtGui import QFont, QFontMetrics, QIcon, QPixmap
 from PyQt5.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 
@@ -24,6 +24,39 @@ from .logging_setup import get_logger
 from .protocol import NotificationPayload, resolve_icon_path
 
 logger = get_logger("OSDNotifier.Widget")
+
+_ZERO_WIDTH_SPACE = "\u200b"
+
+
+def insert_soft_breaks(text: str, max_run: int) -> str:
+    """Insert zero-width space break opportunities into any run of
+    non-whitespace characters longer than ``max_run``.
+
+    Qt's word-wrap (``Qt.TextWordWrap``) only breaks at existing word
+    boundaries (whitespace). A single "word" with no spaces at all — a long
+    URL, a run of repeated characters, base64, etc. — is wider than the
+    window and will NOT wrap; it simply overflows past the label's edge no
+    matter how tall the window is made. A zero-width space is invisible but
+    is still a valid break point for Qt's line-wrapping engine, so this
+    gives long unbroken runs somewhere to break without changing how the
+    text visibly reads.
+    """
+    if not text or max_run <= 0:
+        return text
+
+    out = []
+    run_len = 0
+    for ch in text:
+        if ch.isspace():
+            run_len = 0
+            out.append(ch)
+            continue
+        if run_len >= max_run:
+            out.append(_ZERO_WIDTH_SPACE)
+            run_len = 0
+        out.append(ch)
+        run_len += 1
+    return "".join(out)
 
 
 class OSDNotification(QWidget):
@@ -83,34 +116,79 @@ class OSDNotification(QWidget):
         self.visual_label.setStyleSheet(f"color: {text_color}; border: none; background: transparent;")
         self.details_label.setStyleSheet(f"color: {text_color}; border: none; background: transparent;")
 
-        self.frame_layout.addWidget(self.visual_label, stretch=3)
+        self.frame_layout.addWidget(self.visual_label, stretch=0)
         self.frame_layout.addWidget(self.details_label, stretch=1)
         layout.addWidget(self.frame)
 
-    def _adjust_window_size_for_text(self, subtitle: str) -> None:
-        """Dynamically resize window width based on subtitle length, capped
-        to a config-defined maximum so a malicious/huge payload can't grow
-        the window off-screen. All dimensions come from the ``[window]``
-        config section and are re-read on every call, so edits to the INI
-        file take effect on the next notification without a restart."""
+    def _chrome_width(self) -> int:
+        """Total horizontal padding consumed by the outer layout and inner
+        frame margins — subtracted from the window width to get the actual
+        space available for wrapped text."""
+        outer = self.layout().contentsMargins()
+        inner = self.frame_layout.contentsMargins()
+        return outer.left() + outer.right() + inner.left() + inner.right()
+
+    def _adjust_window_size_for_text(self, subtitle: str) -> str:
+        """Dynamically resize window width *and* height to fit the subtitle,
+        with wrapping measured against the actual available label width —
+        not just a flat size bump — so long text always gets enough
+        vertical space instead of being clipped.
+
+        Also inserts soft break points (see ``insert_soft_breaks``) into any
+        unbroken run of non-whitespace longer than
+        ``window.soft_wrap_chars``, since Qt's word-wrap can't break a
+        single "word" on its own and would otherwise let it overflow past
+        the window edge regardless of height.
+
+        Returns the (possibly soft-broken) text that was measured — callers
+        MUST use this exact string for ``details_label.setText(...)`` so
+        what's measured and what's rendered always match.
+
+        All dimensions come from the ``[window]`` config section and are
+        re-read on every call, so edits to the INI file take effect on the
+        next notification without a restart.
+        """
         base_width, base_height = self.config.get_base_size()
 
         if not subtitle:
             self.setFixedSize(base_width, base_height)
-            return
+            return subtitle
+
+        subtitle = insert_soft_breaks(subtitle, self.config.get_soft_wrap_chars())
 
         min_width = self.config.get_min_width()
         max_width = self.config.get_max_width()
+        max_height = self.config.get_max_height()
         text_padding = self.config.get_text_padding()
-        extra_height = self.config.get_extra_height()
 
         font_metrics = QFontMetrics(self.details_label.font())
-        text_width = font_metrics.horizontalAdvance(subtitle) + text_padding
+        raw_text_width = font_metrics.horizontalAdvance(subtitle)
+        dynamic_width = max(min_width, min(raw_text_width + text_padding, max_width))
 
-        dynamic_width = max(min_width, min(text_width, max_width))
-        dynamic_height = base_height + extra_height if text_width > max_width else base_height
+        # Determine the actual space available to the wrapped label at this
+        # window width, then check whether the text needs more than one
+        # line there — comparing rendered heights directly is unreliable
+        # since Qt's word-wrap bounding rect includes extra leading even
+        # for single-line text.
+        chrome_width = self._chrome_width()
+        inner_width = max(10, dynamic_width - chrome_width)
+
+        if raw_text_width <= inner_width:
+            # Fits on a single line: no extra height needed.
+            dynamic_height = base_height
+        else:
+            wrapped_rect = font_metrics.boundingRect(
+                QRect(0, 0, inner_width, 0),
+                int(Qt.TextWordWrap) | int(Qt.AlignHCenter),
+                subtitle,
+            )
+            single_line_height = font_metrics.lineSpacing()
+            extra_text_height = max(0, wrapped_rect.height() - single_line_height)
+            padding = self.config.get_extra_height()
+            dynamic_height = min(base_height + extra_text_height + padding, max_height)
 
         self.setFixedSize(dynamic_width, dynamic_height)
+        return subtitle
 
     # ------------------------------------------------------------------ #
     # Public display API
@@ -119,7 +197,7 @@ class OSDNotification(QWidget):
     def show_character(self, char_val: str, hex_str: str = "",
                         sticky: Optional[bool] = None, timeout: Optional[int] = None) -> None:
         subtitle = f"U+{hex_str.upper()}" if hex_str else ""
-        self._adjust_window_size_for_text(subtitle)
+        subtitle = self._adjust_window_size_for_text(subtitle)
 
         self.visual_label.clear()
         self.visual_label.setText(char_val)
@@ -130,7 +208,7 @@ class OSDNotification(QWidget):
                     max_size: Optional[Tuple[int, int]] = None,
                     sticky: Optional[bool] = None, timeout: Optional[int] = None) -> None:
         max_size = max_size or self.config.get_icon_max_size()
-        self._adjust_window_size_for_text(subtitle)
+        subtitle = self._adjust_window_size_for_text(subtitle)
         self.visual_label.clear()
 
         pixmap = QPixmap()
@@ -170,7 +248,7 @@ class OSDNotification(QWidget):
 
         display_char = payload.title if len(payload.title) <= 2 else "\U0001f514"
         subtitle = payload.text if len(payload.title) <= 2 else f"{payload.title}\n{payload.text}"
-        self._adjust_window_size_for_text(subtitle)
+        subtitle = self._adjust_window_size_for_text(subtitle)
         self.visual_label.clear()
         self.visual_label.setText(display_char)
         self.details_label.setText(subtitle)
