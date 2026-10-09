@@ -168,3 +168,25 @@ def test_cascade_step_default_and_clamping(cm: OSDConfigManager):
 
     cm.write_config("notification", "stack_gap", "9999")
     assert cm.get_cascade_step() == 200
+
+
+def test_icon_sandbox_default_and_toggle(cm: OSDConfigManager):
+    assert cm.get_icon_sandbox_enabled() is True
+
+    cm.write_config("server", "icon_sandbox", "False")
+    assert cm.get_icon_sandbox_enabled() is False
+
+    cm.write_config("server", "icon_sandbox", "True")
+    assert cm.get_icon_sandbox_enabled() is True
+
+
+def test_allowed_icon_dirs_includes_cwd_and_config_dir(cm: OSDConfigManager):
+    dirs = cm.get_allowed_icon_dirs()
+    assert cm.config_path.parent.resolve() in dirs
+
+
+def test_allowed_icon_dirs_strips_quotes(cm: OSDConfigManager):
+    cm.write_config("server", "allowed_icon_dirs", '"/some/quoted/dir"')
+    dirs = cm.get_allowed_icon_dirs()
+    from pathlib import Path
+    assert Path("/some/quoted/dir").resolve() in dirs

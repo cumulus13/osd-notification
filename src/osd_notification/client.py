@@ -17,12 +17,20 @@ import os
 import socket
 import time
 from typing import Callable, Optional
+import traceback
 
-from .exceptions import ClientError
-from .logging_setup import get_logger
+try:
+    from . debugger import debug, logger, is_debug  # type: ignore
+except:
+    from debugger import debug, logger, is_debug  # type: ignore
+
+_UDP_MAX_DATAGRAM = 60_000  # safely under the 65,507-byte UDP payload limit
+
+from .exceptions import ClientError, PayloadValidationError
+# from .logging_setup import get_logger
 from .protocol import CONTROL_DISMISS_ALL, NotificationPayload
 
-logger = get_logger("OSDNotifier.Client")
+# logger = logger.get_logger("OSDNotifier.Client")
 
 try:  # optional: load .env if envdot is installed and present
     from envdot import load_env  # type: ignore
@@ -61,12 +69,56 @@ class NotificationClient:
     # High-level API
     # ------------------------------------------------------------------ #
 
-    def send(self, title: str, text: str = "", icon: Optional[str] = None,
+    def send1(self, title: str, text: str = "", icon: Optional[str] = None,
               sticky: bool = False, timeout: Optional[int] = None,
               transport: str = "udp") -> None:
         """Build and send a payload. `transport` is "udp" or "gntp"."""
         payload = NotificationPayload(title=title, text=text, icon=icon,
                                        sticky=sticky, timeout=timeout, source="client")
+        if transport == "udp":
+            self.send_udp(payload)
+        elif transport == "gntp":
+            self.send_gntp(payload)
+        else:
+            raise ClientError(f"Unknown transport: {transport!r} (expected 'udp' or 'gntp')")
+
+
+    def send(self, title: str, text: str = "", icon: Optional[str] = None,
+              sticky: bool = False, timeout: Optional[int] = None,
+              transport: str = "udp") -> None:
+        """Build and send a payload. `transport` is "udp" or "gntp".
+
+        If `icon` points at a local, readable image file, its bytes are
+        embedded directly in the payload (`icon_data`) for both
+        transports — GNTP as a spec-compliant inline binary resource,
+        UDP as base64 in the JSON body — rather than sending a bare path
+        that only resolves if the server happens to be on the same
+        machine with the same file at the same path. An `http(s)://` icon
+        is left as a URL either way (fetched by the receiver, not
+        embedded). If the file can't be read, it falls back to sending
+        `icon` as a plain string, same as before.
+        """
+        icon_data = None
+        if icon and not icon.lower().startswith(("http://", "https://")):
+            try:
+                from pathlib import Path
+                candidate = Path(icon).expanduser()
+                if candidate.is_file():
+                    icon_data = candidate.read_bytes()
+            except (OSError, ValueError):
+                icon_data = None
+
+        try:
+            payload = NotificationPayload(title=title, text=text, icon=icon,
+                                           sticky=sticky, timeout=timeout, source="client",
+                                           icon_data=icon_data)
+        except PayloadValidationError:
+            # icon_data too large or otherwise invalid: fall back to
+            # sending just the icon path/string, same as pre-embedding
+            # behavior, rather than failing the whole send.
+            payload = NotificationPayload(title=title, text=text, icon=icon,
+                                           sticky=sticky, timeout=timeout, source="client")
+
         if transport == "udp":
             self.send_udp(payload)
         elif transport == "gntp":
@@ -94,7 +146,19 @@ class NotificationClient:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(self.timeout)
         try:
-            sock.sendto(payload.to_json().encode("utf-8"), (self.host, self.udp_port))
+            message = payload.to_json().encode("utf-8")
+            if len(message) > _UDP_MAX_DATAGRAM and payload.icon_data is not None:
+                logger.warning(
+                    "Embedded icon makes the UDP datagram %d bytes (max ~%d); sending the icon "
+                    "path only. Use --transport gntp to embed larger icons.",
+                    len(message), _UDP_MAX_DATAGRAM,
+                )
+                slim = NotificationPayload(
+                    title=payload.title, text=payload.text, icon=payload.icon,
+                    sticky=payload.sticky, timeout=payload.timeout, source=payload.source,
+                )
+                message = slim.to_json().encode("utf-8")
+            sock.sendto(message, (self.host, self.udp_port))
             logger.debug("Sent UDP notification to %s:%s: %s", self.host, self.udp_port, payload.title)
         except OSError as exc:
             raise ClientError(f"UDP send to {self.host}:{self.udp_port} failed: {exc}") from exc
@@ -116,15 +180,25 @@ class NotificationClient:
     def _send_gntp_once(self, payload: NotificationPayload) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
+        debug(self_host = self.host)
+        debug(self_gntp_port = self.gntp_port)
+        
         try:
             sock.connect((self.host, self.gntp_port))
-            sock.sendall(payload.to_gntp().encode("utf-8"))
+            sock.sendall(payload.build_gntp_message())
             response = sock.recv(1024).decode("utf-8", errors="ignore")
             if "-OK" not in response:
                 raise ClientError(f"GNTP server rejected notification: {response.strip()!r}")
             logger.debug("Sent GNTP notification to %s:%s: %s", self.host, self.gntp_port, payload.title)
         except OSError as exc:
             raise ClientError(f"GNTP send to {self.host}:{self.gntp_port} failed: {exc}") from exc
+        except Exception as e:
+            if is_debug():
+                traceback.print_exc()
+            else:
+                print(f"ERROR on register [1]: {e}")
+
+
         finally:
             sock.close()
 

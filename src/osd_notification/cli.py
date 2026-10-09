@@ -61,6 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     send_group.add_argument("--dismiss-all", action="store_true",
                              help="\U0001f6d1 Tell the running server to immediately close "
                                   "every currently visible notification")
+    send_group.add_argument("--check-icon", metavar="PATH", default=None,
+                             help="\U0001f50d Diagnose why an icon path would or wouldn't be "
+                                  "used, instead of guessing")
 
     return parser
 
@@ -150,7 +153,44 @@ def _handle_dismiss_all(cm: OSDConfigManager) -> int:
         return 1
     _print("\u2705 [bold #00FF00]Dismissed all notifications.[/]")
     return 0
-    return 0
+
+
+def _handle_check_icon(cm: OSDConfigManager, icon_arg: str) -> int:
+    from .protocol import IconRejectReason, resolve_icon_path_verbose
+
+    sandbox = cm.get_icon_sandbox_enabled()
+    allowed_dirs = None if not sandbox else cm.get_allowed_icon_dirs()
+    resolved, reason = resolve_icon_path_verbose(icon_arg, allowed_dirs)
+
+    _print(f"Input:          {icon_arg!r}")
+    _print(f"icon_sandbox:   {sandbox}")
+    if allowed_dirs is not None:
+        _print("Allowed dirs:")
+        for d in allowed_dirs:
+            _print(f"  - {d}")
+    else:
+        _print("Allowed dirs:   (sandbox disabled — any existing image file is used)")
+
+    if resolved is not None:
+        _print(f"\u2705 [bold #00FF00]Would be used:[/] {resolved}")
+        return 0
+
+    explanations = {
+        IconRejectReason.EMPTY: "no path given",
+        IconRejectReason.BAD_PATH: "not a valid filesystem path",
+        IconRejectReason.BAD_EXTENSION: "extension not in the allowed image list "
+                                        "(.png .jpg .jpeg .bmp .gif .ico .svg)",
+        IconRejectReason.NOT_A_FILE: "file does not exist at the resolved path",
+        IconRejectReason.OUTSIDE_ALLOWED_DIRS: "resolved path is outside every allowed "
+                                                "directory listed above",
+    }
+    explanation = explanations.get(reason, str(reason))
+    _print(f"\u274c [white on red]Would NOT be used:[/] {explanation}")
+    if reason == IconRejectReason.OUTSIDE_ALLOWED_DIRS:
+        _print("Fix: move the icon under one of the allowed dirs above, add its folder to "
+               "`osd-notification -c server allowed_icon_dirs <dir>`, or disable the sandbox "
+               "with `osd-notification -c server icon_sandbox False`.")
+    return 1
 
 
 def _handle_server_or_test(cm: OSDConfigManager, args: argparse.Namespace) -> int:
@@ -210,6 +250,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         if args.dismiss_all:
             return _handle_dismiss_all(cm)
+
+        if args.check_icon is not None:
+            return _handle_check_icon(cm, args.check_icon)
 
         if args.test or args.server or args.tray or cm.get_bool("server", "enabled", False):
             return _handle_server_or_test(cm, args)

@@ -96,7 +96,9 @@ Config lives at `~/.osd-notification/osd-notification.ini` (Windows: `%USERPROFI
 | `server`       | `udp_port`             | `23054`         |                                           |
 | `server`       | `host`                 | `127.0.0.1`     |                                           |
 | `server`       | `max_payload_bytes`    | `65535`         | UDP receive cap                          |
-| `server`       | `allowed_icon_dirs`    | `` (empty)      | `os.pathsep`-separated; CWD always allowed |
+| `server`       | `allowed_icon_dirs`    | `` (empty)      | `os.pathsep`-separated; CWD and the config directory are always allowed |
+| `server`       | `icon_sandbox`         | `True`          | `False` disables the allow-list entirely — any existing image file is used |
+| `server`       | `allow_icon_urls`      | `False`         | `True` lets the server download `http(s)://` icons referenced by notifications |
 | `window`       | `base_width`           | `240`           | default window width, px                |
 | `window`       | `base_height`          | `240`           | default window height, px                |
 | `window`       | `min_width`            | `240`           | floor for text-driven auto-resize        |
@@ -206,11 +208,63 @@ osd-notification --reset-config window   # reset one section to defaults
 osd-notification --reset-config          # reset every section
 ```
 
+### Diagnosing an icon that won't show
+
+If a custom icon always falls back to the default glyph, don't guess — check exactly why:
+
+```bash
+osd-notification --check-icon "C:\path\to\icon.png"
+```
+
+Reports the resolved path, whether the sandbox is on, every currently allowed directory, and
+— if it fails — the precise reason (bad extension, file doesn't exist, or outside every
+allowed directory) plus a fix. Common causes this catches:
+
+- **Wrapped in quotes** in the ini (`icon_path = "C:\icons\foo.png"`) — now stripped
+  automatically, for both the tray icon and per-notification icons.
+- **Case mismatch** in the resolved path vs. an allowed directory (e.g. a differently-cased
+  drive letter) — the containment check is now case-insensitive to match how Windows'
+  filesystem actually behaves (`Path.relative_to` alone is case-sensitive even on Windows,
+  which silently rejected otherwise-valid icons).
+- **Outside every allowed directory** — add its folder with
+  `osd-notification -c server allowed_icon_dirs <dir>`, or turn the allow-list off entirely
+  with `osd-notification -c server icon_sandbox False` for local/trusted use.
+
+### Icons over GNTP and UDP (spec-compliant)
+
+Per the GNTP 1.0 spec, `Notification-Icon` is **either** an `http(s)://` URL **or** a reference
+to an inline binary resource — `x-growl-resource://<id>` — whose bytes follow the headers as an
+`Identifier:` / `Length:` block. A bare local path is *not* part of the spec (it only ever worked
+because our own client and server agreed on it, and only on one machine).
+
+`NotificationClient.send` / `osd-notification --send --icon FILE` therefore now:
+
+| `--icon` value            | GNTP                                              | UDP (JSON)                                  |
+|---------------------------|---------------------------------------------------|---------------------------------------------|
+| local image file          | embedded as an `x-growl-resource` binary section  | embedded as `icon_base64` in the JSON body  |
+| `http(s)://` URL          | plain `Notification-Icon: <url>` header           | `icon` field (URL)                          |
+| unreadable / missing file | path passed through as a plain header (legacy)    | `icon` field (path, legacy)                 |
+
+The server renders embedded icon bytes directly — no filesystem lookup, so the sandbox, quoting
+and case problems of path icons don't apply, and it works when client and server are on
+different machines. It also accepts requests from third-party GNTP senders that follow the spec.
+URL icons are only downloaded when `server.allow_icon_urls = True` (off by default, since it makes
+the server issue outbound requests); downloads are capped at 2 MiB with a 3-second timeout.
+
+UDP datagrams top out around 64 KB: if an embedded icon would exceed that, the client logs a
+warning and sends the path only — use `--transport gntp` for larger icons.
+
+Both transports deliver an identical `NotificationPayload` (title, text, icon bytes, sticky,
+timeout) to the same rendering code; this is covered by integration tests over real sockets.
+(Previously `timeout` was silently dropped over GNTP — fixed.)
+
 ## Security notes
 
-- Icon references from the network are resolved with `resolve_icon_path`, which rejects
-  anything outside `allowed_icon_dirs`, non-image extensions, or non-existent files —
-  this closes the path-traversal hole present in a naive `os.path.exists(icon)` check.
+- Icon references are resolved with `resolve_icon_path`, which (when `icon_sandbox = True`,
+  the default) rejects anything outside `allowed_icon_dirs`, non-image extensions, or
+  non-existent files — this closes the path-traversal hole present in a naive
+  `os.path.exists(icon)` check. Set `icon_sandbox = False` to disable the directory
+  allow-list for local/trusted use (extension and existence checks still apply).
 - UDP/TCP payloads are size-capped and run through `NotificationPayload` validation
   (title/text length limits, timeout bounds) before they ever reach the GUI.
 - Secret-looking config keys (`token`, `password`, `client_id`, `client_secret`) are

@@ -10,19 +10,21 @@
 #              shutdown of sockets and threads.
 # License: MIT
 
-
 from __future__ import annotations
 
 import socket
 import socketserver
 import threading
+from pathlib import Path
 from typing import Callable, Optional
 
 from .exceptions import PayloadValidationError, ServerError
 from .logging_setup import get_logger
 from .protocol import (
     GNTP_OK_RESPONSE,
+    MAX_ICON_BYTES,
     NotificationPayload,
+    extract_gntp_resource_id,
     is_known_control_command,
     parse_gntp_headers,
     try_parse_control_command,
@@ -32,6 +34,29 @@ logger = get_logger("OSDNotifier.Server")
 
 _SOCKET_TIMEOUT_SECONDS = 10
 _MAX_HEADER_LINES = 64
+_MAX_RESOURCE_SECTIONS = 8
+_ICON_FETCH_TIMEOUT_SECONDS = 3
+
+
+def fetch_icon_url(url: str, max_bytes: int = MAX_ICON_BYTES) -> Optional[bytes]:
+    """Download an http(s) icon referenced by a GNTP `Notification-Icon`
+    header (the spec allows a plain URL there). Size-capped, short timeout,
+    http/https only; returns None on any failure rather than raising."""
+    from urllib.request import Request, urlopen
+
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    try:
+        req = Request(url, headers={"User-Agent": "osd-notification"})
+        with urlopen(req, timeout=_ICON_FETCH_TIMEOUT_SECONDS) as resp:  # noqa: S310
+            data = resp.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            logger.warning("Icon URL %s exceeds %d bytes; ignoring.", url, max_bytes)
+            return None
+        return data
+    except Exception as exc:
+        logger.warning("Could not fetch icon URL %s: %s", url, exc)
+        return None
 
 PayloadHandler = Callable[[NotificationPayload], None]
 ControlHandler = Callable[[str], None]
@@ -50,6 +75,7 @@ class GNTPTCPHandler(socketserver.StreamRequestHandler):
                 logger.debug("Rejected non-GNTP request line: %r", request_line[:80])
                 return
 
+            # --- 1. Parse Main Headers ---
             raw_lines = []
             for _ in range(_MAX_HEADER_LINES):
                 line = self.rfile.readline(4096)
@@ -62,8 +88,10 @@ class GNTPTCPHandler(socketserver.StreamRequestHandler):
 
             headers = parse_gntp_headers(raw_lines)
 
+            icon_data = self._read_icon_data(headers)
+
             try:
-                payload = NotificationPayload.from_gntp_headers(headers, source="gntp")
+                payload = NotificationPayload.from_gntp_headers(headers, source="gntp", icon_data=icon_data)
             except PayloadValidationError as exc:
                 logger.warning("Rejected invalid GNTP payload: %s", exc)
                 return
@@ -76,18 +104,82 @@ class GNTPTCPHandler(socketserver.StreamRequestHandler):
 
             self.wfile.write(GNTP_OK_RESPONSE.encode("utf-8"))
             self.wfile.flush()
+            
         except (ConnectionResetError, socket.timeout) as exc:
             logger.debug("GNTP connection closed early: %s", exc)
         except Exception as exc:  # pragma: no cover - defensive network boundary
             logger.error("Error handling GNTP request: %s", exc)
 
 
+    def _read_icon_data(self, headers) -> Optional[bytes]:
+        """Resolve the Notification-Icon header per the GNTP spec:
+        `x-growl-resource://<id>` -> read the inline binary section(s)
+        following the headers and return the one matching <id>;
+        `http(s)://` -> fetch it, only if `server.allow_icon_urls` is on;
+        anything else (e.g. a local path) -> None, left for the widget's
+        filesystem resolution."""
+        icon_value = headers.get("notification-icon") or headers.get("icon") or ""
+        if not icon_value:
+            return None
+
+        resource_id = extract_gntp_resource_id(icon_value)
+        if resource_id is not None:
+            sections = self._read_binary_sections(wanted_id=resource_id)
+            data = sections.get(resource_id)
+            if data is None:
+                logger.warning("GNTP icon resource %r referenced but not received.", resource_id)
+            return data
+
+        if icon_value.lower().startswith(("http://", "https://")):
+            if getattr(self.server, "allow_icon_urls", False):
+                return fetch_icon_url(icon_value)
+            logger.info("Icon URL ignored (server.allow_icon_urls is off): %s", icon_value)
+        return None
+
+    def _read_binary_sections(self, wanted_id: Optional[str] = None) -> dict:
+        """Read `Identifier:`/`Length:` binary sections that follow the
+        header block, using each section's declared length (the client
+        keeps the socket open awaiting our reply, so reading to EOF would
+        block). Stops as soon as `wanted_id` has been read — attempting to
+        read a further section would block on data that may never come."""
+        sections: dict = {}
+        for _ in range(_MAX_RESOURCE_SECTIONS):
+            id_line = self.rfile.readline(4096).decode("utf-8", errors="ignore").strip()
+            if not id_line.lower().startswith("identifier:"):
+                break
+            identifier = id_line.split(":", 1)[1].strip()
+
+            len_line = self.rfile.readline(4096).decode("utf-8", errors="ignore").strip()
+            if not len_line.lower().startswith("length:"):
+                break
+            try:
+                length = int(len_line.split(":", 1)[1].strip())
+            except ValueError:
+                break
+            if length < 0 or length > MAX_ICON_BYTES:
+                logger.warning("GNTP resource %r has invalid length %s; ignoring.", identifier, length)
+                break
+
+            self.rfile.readline(4096)  # blank line ending the section header
+            data = self.rfile.read(length)
+            if len(data) != length:
+                break
+            sections[identifier] = data
+            if wanted_id is not None and identifier == wanted_id:
+                break
+            self.rfile.readline(4096)  # trailing CRLF CRLF after the data
+            self.rfile.readline(4096)
+        return sections
+
+
 class ThreadedGNTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, *args, payload_handler: Optional[PayloadHandler] = None, **kwargs):
+    def __init__(self, *args, payload_handler: Optional[PayloadHandler] = None,
+                 allow_icon_urls: bool = False, **kwargs):
         self.payload_handler = payload_handler
+        self.allow_icon_urls = allow_icon_urls
         super().__init__(*args, **kwargs)
 
 
@@ -98,12 +190,14 @@ class UDPNotificationServer:
 
     def __init__(self, host: str, port: int, payload_handler: PayloadHandler,
                  max_payload_bytes: int = 65535,
-                 control_handler: Optional[ControlHandler] = None):
+                 control_handler: Optional[ControlHandler] = None,
+                 allow_icon_urls: bool = False):
         self.host = host
         self.port = port
         self.payload_handler = payload_handler
         self.control_handler = control_handler
         self.max_payload_bytes = max_payload_bytes
+        self.allow_icon_urls = allow_icon_urls
         self._sock: Optional[socket.socket] = None
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -165,6 +259,13 @@ class UDPNotificationServer:
                     logger.warning("Rejected invalid UDP payload from %s: %s", addr, exc)
                     return
 
+        if (payload.icon_data is None and payload.icon
+                and payload.icon.lower().startswith(("http://", "https://"))):
+            if self.allow_icon_urls:
+                payload.icon_data = fetch_icon_url(payload.icon)
+            else:
+                logger.info("Icon URL ignored (server.allow_icon_urls is off): %s", payload.icon)
+
         logger.info("UDP notification received from %s: %s", addr, payload.title)
         self.payload_handler(payload)
 
@@ -186,13 +287,15 @@ class NotificationServerManager:
 
     def __init__(self, host: str, gntp_port: int, udp_port: int,
                  payload_handler: PayloadHandler, max_payload_bytes: int = 65535,
-                 control_handler: Optional[ControlHandler] = None):
+                 control_handler: Optional[ControlHandler] = None,
+                 allow_icon_urls: bool = False):
         self.host = host
         self.gntp_port = gntp_port
         self.udp_port = udp_port
         self.payload_handler = payload_handler
         self.control_handler = control_handler
         self.max_payload_bytes = max_payload_bytes
+        self.allow_icon_urls = allow_icon_urls
 
         self._gntp_server: Optional[ThreadedGNTPServer] = None
         self._gntp_thread: Optional[threading.Thread] = None
@@ -209,7 +312,8 @@ class NotificationServerManager:
 
         try:
             self._gntp_server = ThreadedGNTPServer(
-                (self.host, self.gntp_port), GNTPTCPHandler, payload_handler=self.payload_handler
+                (self.host, self.gntp_port), GNTPTCPHandler, payload_handler=self.payload_handler,
+                allow_icon_urls=self.allow_icon_urls,
             )
         except OSError as exc:
             raise ServerError(f"Could not bind GNTP server to {self.host}:{self.gntp_port}: {exc}") from exc
@@ -223,6 +327,7 @@ class NotificationServerManager:
         self._udp_server = UDPNotificationServer(
             self.host, self.udp_port, self.payload_handler, self.max_payload_bytes,
             control_handler=self.control_handler,
+            allow_icon_urls=self.allow_icon_urls,
         )
         self._udp_server.start()
 

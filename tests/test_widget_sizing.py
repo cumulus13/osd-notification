@@ -166,3 +166,25 @@ def test_dismiss_animated_starts_fade_out(widget):
     # Fade animation is running; widget hasn't been hidden yet (that
     # happens once the QPropertyAnimation finishes).
     assert widget.anim is not None
+
+
+def test_remote_notification_renders_inline_icon_data(widget):
+    from osd_notification.protocol import NotificationPayload
+    from tests.test_server_integration import _make_png_bytes
+
+    widget.handle_remote_notification(
+        NotificationPayload(title="Inline", text="has image", icon_data=_make_png_bytes())
+    )
+    pixmap = widget.visual_label.pixmap()
+    assert pixmap is not None and not pixmap.isNull()
+
+
+def test_remote_notification_undecodable_icon_data_falls_back(widget):
+    from osd_notification.protocol import NotificationPayload
+
+    widget.handle_remote_notification(
+        NotificationPayload(title="Bad", text="not an image", icon_data=b"definitely not an image")
+    )
+    pixmap = widget.visual_label.pixmap()
+    assert pixmap is None or pixmap.isNull()
+    assert widget.visual_label.text() != ""

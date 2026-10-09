@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
 from .config import OSDConfigManager
 from .dispatcher import NotificationDispatcher
 from .logging_setup import get_logger
-from .protocol import NotificationPayload, resolve_icon_path
+from .protocol import NotificationPayload, resolve_icon_path_verbose
 
 logger = get_logger("OSDNotifier.Widget")
 
@@ -237,8 +237,20 @@ class OSDNotification(QWidget):
 
     def handle_remote_notification(self, payload: NotificationPayload) -> None:
         """Render a validated ``NotificationPayload`` received from a network server."""
-        allowed_dirs = self.config.get_allowed_icon_dirs()
-        icon_path = resolve_icon_path(payload.icon, allowed_dirs)
+        # Inline icon bytes (GNTP x-growl-resource / UDP base64 / fetched
+        # URL) are self-contained data: no filesystem lookup or sandbox
+        # check applies. Fall through to path resolution if they don't decode.
+        if payload.icon_data:
+            pixmap = QPixmap()
+            if pixmap.loadFromData(payload.icon_data) and not pixmap.isNull():
+                self.show_image(pixmap, subtitle=payload.text or payload.title,
+                                 sticky=payload.sticky, timeout=payload.timeout)
+                return
+            logger.warning("Inline icon data (%d bytes) is not a decodable image; "
+                           "trying the icon path instead.", len(payload.icon_data))
+
+        allowed_dirs = None if not self.config.get_icon_sandbox_enabled() else self.config.get_allowed_icon_dirs()
+        icon_path, reject_reason = resolve_icon_path_verbose(payload.icon, allowed_dirs)
 
         if icon_path is not None:
             self.show_image(icon_path, subtitle=payload.text or payload.title,
@@ -246,7 +258,12 @@ class OSDNotification(QWidget):
             return
 
         if payload.icon:
-            logger.info("Ignoring unresolved/unsafe icon reference: %r", payload.icon)
+            logger.warning(
+                "Icon %r not used (%s) — falling back to the default glyph. "
+                "Run `osd-notification --check-icon %r` to see why, or set "
+                "server.icon_sandbox = False to disable the directory allow-list.",
+                payload.icon, reject_reason, payload.icon,
+            )
 
         display_char = payload.title if len(payload.title) <= 2 else "\U0001f514"
         subtitle = payload.text if len(payload.title) <= 2 else f"{payload.title}\n{payload.text}"

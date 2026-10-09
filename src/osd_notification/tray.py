@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import QAction, QMenu, QSystemTrayIcon, QWidget
 
 from .config import OSDConfigManager
 from .logging_setup import get_logger
+from .protocol import strip_wrapping_quotes
 
 logger = get_logger("OSDNotifier.Tray")
 
@@ -50,7 +51,7 @@ def _build_fallback_icon(color: str = "#89B4FA") -> QIcon:
 def _load_icon(config: OSDConfigManager) -> QIcon:
     icon_path = config.get_val("tray", "icon_path", "")
     if icon_path:
-        path = Path(icon_path).expanduser()
+        path = Path(strip_wrapping_quotes(icon_path)).expanduser()
         if path.is_file():
             icon = QIcon(str(path))
             if not icon.isNull():

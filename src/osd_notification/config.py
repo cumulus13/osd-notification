@@ -65,6 +65,8 @@ class OSDConfigManager(configset_ini.ConfigSetIni):
             "host": "127.0.0.1",
             "max_payload_bytes": "65535",
             "allowed_icon_dirs": "",
+            "icon_sandbox": "True",
+            "allow_icon_urls": "False",
         },
         "window": {
             "base_width": "240",
@@ -251,11 +253,33 @@ class OSDConfigManager(configset_ini.ConfigSetIni):
         return self.get_int("notification", "margin", 20, min_val=0, max_val=500)
 
     def get_allowed_icon_dirs(self) -> list[Path]:
+        from .protocol import strip_wrapping_quotes  # local import: avoids a cycle at module load
+
         raw = self.get_val("server", "allowed_icon_dirs", "")
-        dirs = [Path(p).expanduser().resolve() for p in raw.split(os.pathsep) if p.strip()]
-        # Always allow the current working directory for local/manual use.
+        dirs = [
+            Path(strip_wrapping_quotes(p)).expanduser().resolve()
+            for p in raw.split(os.pathsep) if p.strip()
+        ]
+        # Always allow the current working directory (local/manual use) and
+        # the config directory (a natural place to keep a custom icon next
+        # to osd-notification.ini).
         dirs.append(Path.cwd().resolve())
+        dirs.append(self.config_path.parent.resolve())
         return dirs
+
+    def get_allow_icon_urls(self) -> bool:
+        """When True, the server downloads `http(s)://` icons referenced by
+        incoming notifications (GNTP allows a URL in Notification-Icon).
+        Off by default: it makes the server issue outbound HTTP requests
+        on behalf of whoever can reach the notification port."""
+        return self.get_bool("server", "allow_icon_urls", False)
+
+    def get_icon_sandbox_enabled(self) -> bool:
+        """When False, per-notification icons skip the allowed-directory
+        check entirely (extension + existence are still validated) — an
+        escape hatch for local/trusted use where the default sandbox is too
+        restrictive (e.g. an icon path outside the CWD and config dir)."""
+        return self.get_bool("server", "icon_sandbox", True)
 
     # ------------------------------------------------------------------ #
     # Window geometry (was hardcoded in widget.py; now config-driven)

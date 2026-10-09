@@ -3,8 +3,10 @@
 # File: src/osd_notification/app.py
 # Author: Hadi Cahyadi <cumulus13@gmail.com>
 # Date: 2026-09-11
-# Description: Wires together the Qt application, the OSD widget, and the
-#              optional network servers, with graceful Ctrl+C shutdown.
+#Description: Wires together the Qt application, the notification manager
+#             (which owns all currently-visible OSD windows), the optional
+#             network servers, and the system tray icon, with graceful
+#             Ctrl+C shutdown.
 # License: MIT
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ class OSDApplication:
             payload_handler=self.manager.dispatcher.dispatch,
             max_payload_bytes=max_payload,
             control_handler=self._on_control_command,
+            allow_icon_urls=self.config.get_allow_icon_urls(),
         )
         try:
             self.server_manager.start()
